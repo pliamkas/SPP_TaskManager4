@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📋 Task Manager</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <header>
+        <h1>📋 Task Manager</h1>
+        <nav>
+            <a href="/">All Tasks</a>
+            <a href="/add">Add Task</a>
+        </nav>
+    </header>
+    
+    <main>
+        <div class="container" style="display:flex; gap: 1.5rem; align-items: flex-start;">
+            <aside style="flex:0 0 280px; position: sticky; top: 80px;">
+                <div class="filters">
+                    <h2>Filters</h2>
+                    <form method="GET" action="/" class="filter-form">
+                        <select name="status" onchange="this.form.submit()">
+                            <option value="all" <%= currentFilter === 'all' ? 'selected' : '' %>>All</option>
+                            <option value="pending" <%= currentFilter === 'pending' ? 'selected' : '' %>>Pending</option>
+                            <option value="in-progress" <%= currentFilter === 'in-progress' ? 'selected' : '' %>>In Progress</option>
+                            <option value="completed" <%= currentFilter === 'completed' ? 'selected' : '' %>>Completed</option>
+                        </select>
+                    </form>
+                    
+                </div>
+            </aside>
+
+            <section style="flex:1 1 auto;">
+                <div class="tasks">
+                    <h2>Tasks (<%= tasks.length %>)</h2>
+
+                    <% if (tasks.length === 0) { %>
+                        <div class="no-tasks">
+                            <p>No tasks found. <a href="/add">Add your first task!</a></p>
+                        </div>
+                    <% } else { %>
+                        <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem;">
+                        <% tasks.forEach(task => { %>
+                            <article class="task-card status-<%= task.status %>">
+                                <header class="task-header" style="margin-bottom:0.75rem;">
+                                    <h3 style="flex:1;"><%= task.title %></h3>
+                                </header>
+
+                                <div class="task-meta" style="justify-content: space-between;">
+                                    <span class="status-badge status-<%= task.status %>">
+                                        <%= task.status.charAt(0).toUpperCase() + task.status.slice(1).replace('-', ' ') %>
+                                    </span>
+                                    <% if (task.due_date) { %>
+                                        <span class="due-date">Due: <%= new Date(task.due_date).toLocaleDateString() %></span>
+                                    <% } %>
+                                </div>
+
+                                <% if (task.description) { %>
+                                <p class="task-description" style="display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;">
+                                    <%= task.description %>
+                                </p>
+                                <% } %>
+
+                                <% if (task.attachments && task.attachments.length > 0) { %>
+                                    <div class="attachments">
+                                        <h4>Attachments</h4>
+                                        <ul style="display:flex; flex-wrap:wrap; gap:0.5rem;">
+                                            <% task.attachments.forEach(attachment => { %>
+                                                <li>
+                                                    <a href="/uploads/<%= attachment.filename %>" target="_blank">
+                                                        <%= attachment.original_name %>
+                                                    </a>
+                                                </li>
+                                            <% }) %>
+                                        </ul>
+                                    </div>
+                                <% } %>
+
+                                <footer class="task-actions" style="margin-top:1rem; justify-content: space-between;">
+                                    <form method="POST" action="/toggle-status/<%= task.id %>" style="display:inline;">
+                                        <button type="submit" class="btn btn-status">
+                                            <%= task.status === 'pending' ? 'Start' : task.status === 'in-progress' ? 'Complete' : 'Reset' %>
+                                        </button>
+                                    </form>
+                                    <div style="display:flex; gap:0.5rem;">
+                                        <a href="/edit/<%= task.id %>" class="btn btn-edit">Edit</a>
+                                        <form method="POST" action="/delete/<%= task.id %>" style="display:inline;" onsubmit="return confirm('Are you sure you want to delete this task?')">
+                                            <button type="submit" class="btn btn-delete">Delete</button>
+                                        </form>
+                                    </div>
+                                </footer>
+                            </article>
+                        <% }) %>
+                        </div>
+                    <% } %>
+                </div>
+            </section>
+        </div>
+    </main>
+    
+    <footer>
+        <p>&copy; 2025 Task Manager by Rita</p>
+    </footer>
+</body>
+</html>

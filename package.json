@@ -1,0 +1,24 @@
+{
+  "name": "task-manager-lab1",
+  "version": "1.0.0",
+  "description": "Simple task management application with server-side rendering",
+  "main": "lab1.js",
+  "scripts": {
+    "start": "node lab1.js",
+    "dev": "nodemon lab1.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ejs": "^3.1.9",
+    "multer": "^1.4.5-lts.1",
+    "body-parser": "^1.20.2",
+    "pg": "^8.11.3",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "keywords": ["task", "management", "express", "ejs", "server-side-rendering"],
+  "author": "",
+  "license": "MIT"
+}
