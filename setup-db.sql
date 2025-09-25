@@ -1,12 +1,7 @@
 -- PostgreSQL Database Setup for Task Manager
--- Run this script to create the database and user
 
 -- Create database with UTF-8 encoding
 CREATE DATABASE task_manager WITH ENCODING 'UTF8' LC_COLLATE='en_US.UTF-8' LC_CTYPE='en_US.UTF-8';
-
--- Create user (optional - you can use your existing postgres user)
--- CREATE USER task_user WITH PASSWORD 'your_password';
--- GRANT ALL PRIVILEGES ON DATABASE task_manager TO task_user;
 
 -- Connect to the task_manager database
 \c task_manager;

@@ -1,10 +1,11 @@
 const { Pool } = require('pg');
-require('dotenv').config({ path: './config.env' });
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '..', 'config.env') });
 
 // Database configuration with UTF-8 encoding
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
-  port: process.env.DB_PORT || 5432,
+  port: process.env.DB_PORT ? Number(process.env.DB_PORT) : 5432,
   database: process.env.DB_NAME || 'task_manager',
   user: process.env.DB_USER || 'postgres',
   password: process.env.DB_PASSWORD || 'password',
@@ -27,7 +28,7 @@ async function initializeDatabase() {
   try {
     // Set client encoding to UTF-8
     await pool.query("SET client_encoding = 'UTF8'");
-    
+
     // Create tasks table with UTF-8 support
     await pool.query(`
       CREATE TABLE IF NOT EXISTS tasks (
@@ -66,15 +67,15 @@ const db = {
   async getAllTasks(statusFilter = 'all') {
     let query = 'SELECT * FROM tasks ORDER BY created_at DESC';
     let params = [];
-    
+
     if (statusFilter !== 'all') {
       query = 'SELECT * FROM tasks WHERE status = $1 ORDER BY created_at DESC';
       params = [statusFilter];
     }
-    
+
     const result = await pool.query(query, params);
     const tasks = result.rows;
-    
+
     // Get attachments for each task
     for (let task of tasks) {
       const attachmentsResult = await pool.query(
@@ -83,7 +84,7 @@ const db = {
       );
       task.attachments = attachmentsResult.rows;
     }
-    
+
     return tasks;
   },
 
@@ -92,23 +93,22 @@ const db = {
     if (result.rows.length === 0) {
       return null;
     }
-    
+
     const task = result.rows[0];
-    
+
     // Get attachments for the task
     const attachmentsResult = await pool.query(
       'SELECT * FROM attachments WHERE task_id = $1 ORDER BY uploaded_at ASC',
       [id]
     );
     task.attachments = attachmentsResult.rows;
-    
+
     return task;
   },
 
   async createTask(taskData) {
     const { title, description, status, dueDate } = taskData;
-    // Convert empty string to null for due_date
-    const dueDateValue = dueDate && dueDate.trim() !== '' ? dueDate : null;
+    const dueDateValue = dueDate && String(dueDate).trim() !== '' ? dueDate : null;
     const result = await pool.query(
       'INSERT INTO tasks (title, description, status, due_date) VALUES ($1, $2, $3, $4) RETURNING *',
       [title, description, status, dueDateValue]
@@ -118,8 +118,7 @@ const db = {
 
   async updateTask(id, taskData) {
     const { title, description, status, dueDate } = taskData;
-    // Convert empty string to null for due_date
-    const dueDateValue = dueDate && dueDate.trim() !== '' ? dueDate : null;
+    const dueDateValue = dueDate && String(dueDate).trim() !== '' ? dueDate : null;
     const result = await pool.query(
       'UPDATE tasks SET title = $1, description = $2, status = $3, due_date = $4, updated_at = CURRENT_TIMESTAMP WHERE id = $5 RETURNING *',
       [title, description, status, dueDateValue, id]
@@ -134,7 +133,7 @@ const db = {
   async toggleTaskStatus(id) {
     const task = await this.getTaskById(id);
     if (!task) return null;
-    
+
     let newStatus;
     if (task.status === 'pending') {
       newStatus = 'in-progress';
@@ -143,7 +142,7 @@ const db = {
     } else if (task.status === 'completed') {
       newStatus = 'pending';
     }
-    
+
     const result = await pool.query(
       'UPDATE tasks SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
       [newStatus, id]

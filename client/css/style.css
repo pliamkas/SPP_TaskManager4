@@ -361,13 +361,8 @@ main {
     letter-spacing: 0.2px;
 }
 
-.attachments ul {
-    list-style: none;
-}
-
-.attachments li {
-    margin-bottom: 0.5rem;
-}
+.attachments ul { list-style: none; }
+.attachments li { margin-bottom: 0.5rem; }
 
 .attachments a {
     color: #60a5fa;
@@ -381,9 +376,7 @@ main {
     font-weight: 500;
 }
 
-.attachments a:hover {
-    color: #1d4ed8;
-}
+.attachments a:hover { color: #1d4ed8; }
 
 /* Forms */
 .task-form {
@@ -397,9 +390,7 @@ main {
     margin: 0 auto;
 }
 
-.form-group {
-    margin-bottom: 1.5rem;
-}
+.form-group { margin-bottom: 1.5rem; }
 
 .form-group label {
     display: block;
@@ -445,26 +436,10 @@ main {
     margin-top: 2rem;
 }
 
-.current-attachments {
-    list-style: none;
-    background: #f8f9fa;
-    padding: 1rem;
-    border-radius: 5px;
-    border: 1px solid #dee2e6;
-}
-
-.current-attachments li {
-    margin-bottom: 0.5rem;
-}
-
-.current-attachments a {
-    color: #667eea;
-    text-decoration: none;
-}
-
-.current-attachments a:hover {
-    text-decoration: underline;
-}
+.current-attachments { list-style: none; background: #f8f9fa; padding: 1rem; border-radius: 5px; border: 1px solid #dee2e6; }
+.current-attachments li { margin-bottom: 0.5rem; }
+.current-attachments a { color: #667eea; text-decoration: none; }
+.current-attachments a:hover { text-decoration: underline; }
 
 /* Footer */
 footer {
@@ -476,29 +451,11 @@ footer {
     border-top: 1px solid rgba(30, 64, 175, 0.1);
 }
 
-/* Responsive design */
+/* Responsive */
 @media (max-width: 768px) {
-    .container {
-        padding: 0 0.5rem;
-    }
-    
-    .task-header {
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 1rem;
-    }
-    
-    .task-actions {
-        width: 100%;
-        justify-content: flex-start;
-    }
-    
-    .form-actions {
-        flex-direction: column;
-    }
-    
-    .btn {
-        width: 100%;
-        text-align: center;
-    }
+    .container { padding: 0 0.5rem; }
+    .task-header { flex-direction: column; align-items: flex-start; gap: 1rem; }
+    .task-actions { width: 100%; justify-content: flex-start; }
+    .form-actions { flex-direction: column; }
+    .btn { width: 100%; text-align: center; }
 }
