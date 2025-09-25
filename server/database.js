@@ -33,9 +33,9 @@ async function initializeDatabase() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS tasks (
         id SERIAL PRIMARY KEY,
-        title VARCHAR(255) NOT NULL,
-        description TEXT,
-        status VARCHAR(50) DEFAULT 'pending',
+        title VARCHAR(255) NOT NULL CHECK (LENGTH(title) <= 255),
+        description TEXT CHECK (LENGTH(description) <= 10000),
+        status VARCHAR(50) DEFAULT 'pending' CHECK (status IN ('pending', 'in-progress', 'completed')),
         due_date DATE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

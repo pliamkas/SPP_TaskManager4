@@ -16,6 +16,38 @@ function badgeText(status) {
   return status
 }
 
+function validateFile(file) {
+  const maxSize = 5 * 1024 * 1024; // 5MB
+  const allowedTypes = [
+    'image/jpeg', 'image/jpg', 'image/png', 'image/gif',
+    'application/pdf', 'application/msword', 
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'text/plain', 'application/zip', 'application/x-rar-compressed'
+  ];
+  
+  if (file.size > maxSize) {
+    throw new Error(`File "${file.name}" is too large. Maximum size is 5MB.`);
+  }
+  
+  if (!allowedTypes.includes(file.type)) {
+    throw new Error(`File type "${file.type}" is not allowed. Only images, PDFs, documents, and archives are allowed.`);
+  }
+  
+  return true;
+}
+
+function validateFiles(files) {
+  if (files.length > 10) {
+    throw new Error('Too many files. Maximum 10 files per upload.');
+  }
+  
+  for (const file of files) {
+    validateFile(file);
+  }
+  
+  return true;
+}
+
 function App() {
   const [tasks, setTasks] = useState([])
   const [status, setStatus] = useState('all')
@@ -95,6 +127,15 @@ function App() {
 
     const save = async () => {
       try {
+        if (local.title.length > 255) {
+          alert('Title must be 255 characters or less');
+          return;
+        }
+        if (local.description.length > 10000) {
+          alert('Description must be 10,000 characters or less');
+          return;
+        }
+        
         await fetchJson(`${apiBase}/tasks/${task.id}`, {
           method: 'PUT', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -111,6 +152,14 @@ function App() {
 
     const uploadFiles = async (files) => {
       if (!files || files.length === 0) return
+      
+      try {
+        validateFiles(Array.from(files));
+      } catch (error) {
+        alert(error.message);
+        return;
+      }
+      
       for (const file of Array.from(files)) {
         const tempId = `temp-${Date.now()}-${Math.random().toString(16).slice(2)}`
         const temp = { id: tempId, filename: file.name, originalName: file.name, url: '#', uploading: true }
@@ -134,11 +183,12 @@ function App() {
               setAttachments(prev => prev.filter(a => a.id !== tempId))
             }
           } else {
-            alert(`File upload error: ${file.name}`)
+            const errorData = await res.json().catch(() => ({}));
+            alert(`File upload error: ${errorData.error || file.name}`)
             setAttachments(prev => prev.filter(a => a.id !== tempId))
           }
         } catch (e) {
-          alert(`File upload error: ${file.name}`)
+          alert(`File upload error: ${e.message}`)
           setAttachments(prev => prev.filter(a => a.id !== tempId))
         }
       }
@@ -203,13 +253,27 @@ function App() {
 
     const addFiles = (newFiles) => {
       if (newFiles && newFiles.length > 0) {
-        setFiles(prev => [...prev, ...Array.from(newFiles)])
-        setFileInputKey(prev => prev + 1)
+        try {
+          validateFiles(Array.from(newFiles));
+          setFiles(prev => [...prev, ...Array.from(newFiles)])
+          setFileInputKey(prev => prev + 1)
+        } catch (error) {
+          alert(error.message);
+        }
       }
     }
 
     const create = async () => {
       try {
+        if (local.title.length > 255) {
+          alert('Title must be 255 characters or less');
+          return;
+        }
+        if (local.description.length > 10000) {
+          alert('Description must be 10,000 characters or less');
+          return;
+        }
+        
         const created = await fetchJson(`${apiBase}/tasks`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

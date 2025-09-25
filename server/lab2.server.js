@@ -36,7 +36,25 @@ const storage = multer.diskStorage({
     cb(null, `${base}-${uniqueSuffix}${ext}`);
   }
 });
-const upload = multer({ storage });
+const upload = multer({ 
+  storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB limit per file
+    files: 10 // Max 10 files per request
+  },
+  fileFilter: (req, file, cb) => {
+    // Allow only specific file types
+    const allowedTypes = /jpeg|jpg|png|gif|pdf|doc|docx|txt|zip|rar/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = /image\/jpeg|image\/jpg|image\/png|image\/gif|application\/pdf|application\/msword|application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.document|text\/plain|application\/zip|application\/x-rar-compressed/.test(file.mimetype);
+    
+    if (extname && mimetype) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Only images, PDFs, documents, and archives are allowed'));
+    }
+  }
+});
 
 function normalizeTask(task) {
   if (!task) return null;
@@ -87,7 +105,18 @@ api.get('/tasks/:id', async (req, res) => {
 api.post('/tasks', async (req, res) => {
   try {
     const { title, description, status, dueDate } = req.body;
-    if (!title || typeof title !== 'string') return res.status(400).json({ error: 'Title is required' });
+    
+    // Validation
+    if (!title || typeof title !== 'string') {
+      return res.status(400).json({ error: 'Title is required' });
+    }
+    if (title.length > 255) {
+      return res.status(400).json({ error: 'Title must be 255 characters or less' });
+    }
+    if (description && description.length > 10000) {
+      return res.status(400).json({ error: 'Description must be 10,000 characters or less' });
+    }
+    
     const created = await db.createTask({ title, description: description || '', status: status || 'pending', dueDate: dueDate || null });
     const full = await db.getTaskById(created.id);
     res.status(201).json(normalizeTask(full));
@@ -103,9 +132,21 @@ api.put('/tasks/:id', async (req, res) => {
     const existing = await db.getTaskById(id);
     if (!existing) return res.status(404).json({ error: 'Task not found' });
     const { title, description, status, dueDate } = req.body;
+    
+    // Validation
+    const newTitle = title ?? existing.title;
+    const newDescription = description ?? existing.description;
+    
+    if (newTitle && newTitle.length > 255) {
+      return res.status(400).json({ error: 'Title must be 255 characters or less' });
+    }
+    if (newDescription && newDescription.length > 10000) {
+      return res.status(400).json({ error: 'Description must be 10,000 characters or less' });
+    }
+    
     const updated = await db.updateTask(id, {
-      title: title ?? existing.title,
-      description: description ?? existing.description,
+      title: newTitle,
+      description: newDescription,
       status: status ?? existing.status,
       dueDate: dueDate ?? (existing.due_date ? new Date(existing.due_date).toISOString().slice(0, 10) : null)
     });
@@ -130,35 +171,49 @@ api.delete('/tasks/:id', async (req, res) => {
   }
 });
 
-api.post('/tasks/:id/attachments', upload.single('attachment'), async (req, res) => {
+api.post('/tasks/:id/attachments', upload.array('attachment', 10), async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const existing = await db.getTaskById(id);
     if (!existing) return res.status(404).json({ error: 'Task not found' });
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
 
-    let displayName = req.file.originalname;
-    if (displayName.includes('Ð') || displayName.includes('Ñ')) {
-      try { displayName = Buffer.from(displayName, 'latin1').toString('utf8'); } catch (e) {}
+    const uploadedFiles = [];
+    
+    for (const file of req.files) {
+      let displayName = file.originalname;
+      if (displayName.includes('Ð') || displayName.includes('Ñ')) {
+        try { displayName = Buffer.from(displayName, 'latin1').toString('utf8'); } catch (e) {}
+      }
+
+      const created = await db.addAttachment(id, {
+        filename: file.filename,
+        originalName: displayName,
+        filePath: file.path
+      });
+
+      uploadedFiles.push({
+        id: created.id,
+        filename: created.filename,
+        originalName: created.original_name,
+        filePath: created.file_path,
+        url: `/uploads/${created.filename}`,
+        uploadedAt: created.uploaded_at
+      });
     }
 
-    const created = await db.addAttachment(id, {
-      filename: req.file.filename,
-      originalName: displayName,
-      filePath: req.file.path
-    });
-
-    res.status(201).json({
-      id: created.id,
-      filename: created.filename,
-      originalName: created.original_name,
-      filePath: created.file_path,
-      url: `/uploads/${created.filename}`,
-      uploadedAt: created.uploaded_at
-    });
+    res.status(201).json(uploadedFiles);
   } catch (e) {
     console.error('POST /api/tasks/:id/attachments error:', e);
-    res.status(500).json({ error: 'Failed to upload attachment' });
+    if (e.message.includes('Only images, PDFs')) {
+      res.status(400).json({ error: e.message });
+    } else if (e.code === 'LIMIT_FILE_SIZE') {
+      res.status(400).json({ error: 'File too large. Maximum size is 5MB per file.' });
+    } else if (e.code === 'LIMIT_FILE_COUNT') {
+      res.status(400).json({ error: 'Too many files. Maximum 10 files per upload.' });
+    } else {
+      res.status(500).json({ error: 'Failed to upload attachment' });
+    }
   }
 });
 
