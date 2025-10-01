@@ -2,10 +2,28 @@ import React, { useEffect, useState } from 'react'
 
 const apiBase = '/api'
 
-function fetchJson(url, options) {
-  return fetch(url, options).then(async r => {
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Request failed')
-    return r.json()
+function fetchJson(url, options = {}) {
+  return fetch(url, {
+    ...options,
+    credentials: 'include' 
+  }).then(async r => {
+    if (!r.ok) {
+      const errorData = await r.json().catch(() => ({}));
+      const errorMessage = errorData.error || 'Request failed';
+      
+      // For auth endpoints, treat 401 as normal error
+      if (url.includes('/auth/') && r.status === 401) {
+        throw new Error(errorMessage);
+      }
+      
+      // For other endpoints, treat 401 as auth required
+      if (r.status === 401) {
+        throw new Error('AUTH_REQUIRED');
+      }
+      
+      throw new Error(errorMessage);
+    }
+    return r.json();
   })
 }
 
@@ -55,23 +73,118 @@ function App() {
   const [error, setError] = useState('')
   const [showCreate, setShowCreate] = useState(false)
   const [editingTask, setEditingTask] = useState(null)
+  
+  // Authentication state
+  const [user, setUser] = useState(null)
+  const [showLogin, setShowLogin] = useState(false)
+  const [showRegister, setShowRegister] = useState(false)
+  const [authLoading, setAuthLoading] = useState(false)
+
+  // Authentication functions
+  const checkAuth = async () => {
+    try {
+      const data = await fetchJson(`${apiBase}/auth/me`)
+      setUser(data.user)
+      return true
+    } catch (e) {
+      setUser(null)
+      return false
+    }
+  }
+
+  const login = async (username, password) => {
+    setAuthLoading(true)
+    try {
+      const data = await fetchJson(`${apiBase}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      })
+      setUser(data.user)
+      setShowLogin(false)
+      setError('')
+      return true
+    } catch (e) {
+   
+      throw e
+    } finally {
+      setAuthLoading(false)
+    }
+  }
+
+  const register = async (username, email, password) => {
+    setAuthLoading(true)
+    try {
+      const data = await fetchJson(`${apiBase}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, email, password })
+      })
+      setUser(data.user)
+      setShowRegister(false)
+      setError('')
+      return true
+    } catch (e) {
+  
+      throw e
+    } finally {
+      setAuthLoading(false)
+    }
+  }
+
+  const logout = async () => {
+    try {
+      await fetchJson(`${apiBase}/auth/logout`, { method: 'POST' })
+      setUser(null)
+      setTasks([])
+    } catch (e) {
+      console.error('Logout error:', e)
+    }
+  }
 
   const load = async () => {
+    if (!user) return
     setLoading(true); setError('')
     try {
       const data = await fetchJson(`${apiBase}/tasks?status=${encodeURIComponent(status)}`)
       setTasks(data)
-    } catch (e) { setError(e.message) }
+    } catch (e) { 
+      if (e.message === 'AUTH_REQUIRED') {
+        setUser(null)
+        setShowLogin(true)
+      } else {
+        setError(e.message)
+      }
+    }
     finally { setLoading(false) }
   }
 
-  useEffect(() => { load() }, [status])
+  useEffect(() => { 
+    checkAuth().then(isAuthenticated => {
+      if (isAuthenticated) {
+        load()
+      } else {
+        setShowLogin(true)
+      }
+    })
+  }, [])
+
+  useEffect(() => { load() }, [status, user])
 
   const TaskCard = ({ t }) => {
     const delTask = async () => {
       if (!confirm('Delete task?')) return
-      const res = await fetch(`${apiBase}/tasks/${t.id}`, { method: 'DELETE' })
-      if (res.status === 204) load(); else alert('Deletion error')
+      try {
+        await fetchJson(`${apiBase}/tasks/${t.id}`, { method: 'DELETE' })
+        load()
+      } catch (e) {
+        if (e.message === 'AUTH_REQUIRED') {
+          setUser(null)
+          setShowLogin(true)
+        } else {
+          alert('Failed to delete task: ' + e.message)
+        }
+      }
     }
 
     return (
@@ -124,18 +237,28 @@ function App() {
       dueDate: task.dueDate || ''
     })
     const [attachments, setAttachments] = useState(task.attachments || [])
+    const [editError, setEditError] = useState('')
 
     const save = async () => {
+      setEditError('')
+      
+      // Validation
+      if (!local.title.trim()) {
+        setEditError('Title is required');
+        return;
+      }
+      
+      if (local.title.length > 255) {
+        setEditError('Title must be 255 characters or less');
+        return;
+      }
+      
+      if (local.description.length > 10000) {
+        setEditError('Description must be 10,000 characters or less');
+        return;
+      }
+      
       try {
-        if (local.title.length > 255) {
-          alert('Title must be 255 characters or less');
-          return;
-        }
-        if (local.description.length > 10000) {
-          alert('Description must be 10,000 characters or less');
-          return;
-        }
-        
         await fetchJson(`${apiBase}/tasks/${task.id}`, {
           method: 'PUT', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -147,7 +270,9 @@ function App() {
         })
         onClose();
         load();
-      } catch (e) { alert(e.message) }
+      } catch (e) { 
+        setEditError(e.message)
+      }
     }
 
     const uploadFiles = async (files) => {
@@ -155,8 +280,9 @@ function App() {
       
       try {
         validateFiles(Array.from(files));
+        setEditError('') // Clear any previous errors
       } catch (error) {
-        alert(error.message);
+        setEditError(error.message);
         return;
       }
       
@@ -168,7 +294,11 @@ function App() {
         const fd = new FormData();
         fd.append('attachment', file)
         try {
-          const res = await fetch(`${apiBase}/tasks/${task.id}/attachments`, { method: 'POST', body: fd })
+          const res = await fetch(`${apiBase}/tasks/${task.id}/attachments`, { 
+            method: 'POST', 
+            body: fd,
+            credentials: 'include'
+          })
           if (res.ok) {
             const created = await res.json().catch(()=>null)
             if (created) {
@@ -184,19 +314,29 @@ function App() {
             }
           } else {
             const errorData = await res.json().catch(() => ({}));
-            alert(`File upload error: ${errorData.error || file.name}`)
+            setEditError(`File upload error: ${errorData.error || file.name}`)
             setAttachments(prev => prev.filter(a => a.id !== tempId))
           }
         } catch (e) {
-          alert(`File upload error: ${e.message}`)
+          setEditError(`File upload error: ${e.message}`)
           setAttachments(prev => prev.filter(a => a.id !== tempId))
         }
       }
     }
 
     const delAttachment = async (id) => {
-      const r = await fetch(`${apiBase}/attachments/${id}`, { method:'DELETE' })
-      if (r.status===204) { setAttachments(prev => prev.filter(a => a.id !== id)); } else alert('Deletion error')
+      try {
+        await fetchJson(`${apiBase}/attachments/${id}`, { method: 'DELETE' })
+        setAttachments(prev => prev.filter(a => a.id !== id))
+        setEditError('') // Clear any previous errors
+      } catch (e) {
+        if (e.message === 'AUTH_REQUIRED') {
+          setUser(null)
+          setShowLogin(true)
+        } else {
+          setEditError('Failed to delete attachment: ' + e.message)
+        }
+      }
     }
 
     return (
@@ -207,6 +347,7 @@ function App() {
             <button aria-label="Close" className="delete-x" onClick={onClose}>×</button>
           </div>
           <div className="modal-body">
+            {editError && <div style={{ color: 'red', marginBottom: '1rem', padding: '0.5rem', backgroundColor: '#ffe6e6', border: '1px solid #ff0000', borderRadius: '4px' }}>{editError}</div>}
             <form className="inline" onSubmit={(e)=>{e.preventDefault(); save()}}>
               <input value={local.title} onChange={e=>setLocal(v=>({...v, title: e.target.value}))} />
               <input type="date" value={local.dueDate} onChange={e=>setLocal(v=>({...v, dueDate: e.target.value}))} />
@@ -244,10 +385,202 @@ function App() {
     )
   }
 
+  const LoginModal = ({ onClose }) => {
+    const [formData, setFormData] = useState({ username: '', password: '' })
+    const [loginError, setLoginError] = useState('')
+
+    const handleSubmit = async (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      setLoginError('')
+      
+      // Basic validation
+      if (!formData.username || !formData.password) {
+        setLoginError('Please enter both username and password')
+        return
+      }
+      
+      try {
+        const success = await login(formData.username, formData.password)
+        if (success) {
+          onClose()
+        }
+      } catch (e) {
+        setLoginError(e.message || 'Invalid username or password')
+        // Clear only password, keep username
+        setFormData(prev => ({ ...prev, password: '' }))
+      }
+    }
+
+    return (
+      <div className="modal-backdrop" onClick={(e) => { 
+        e.preventDefault()
+        e.stopPropagation()
+        if (e.target === e.currentTarget) onClose() 
+      }}>
+        <div className="modal" onClick={(e) => { e.stopPropagation() }}>
+          <div className="modal-header">
+            <h3>Login</h3>
+            <button aria-label="Close" className="delete-x" onClick={onClose}>×</button>
+          </div>
+          <div className="modal-body">
+            <form onSubmit={handleSubmit}>
+              <div style={{ marginBottom: '1rem' }}>
+                <input
+                  type="text"
+                  placeholder="Username"
+                  value={formData.username}
+                  onChange={e => setFormData(prev => ({ ...prev, username: e.target.value }))}
+                  required
+                  style={{ width: '100%', padding: '0.75rem', marginBottom: '0.5rem' }}
+                />
+                <input
+                  type="password"
+                  placeholder="Password"
+                  value={formData.password}
+                  onChange={e => setFormData(prev => ({ ...prev, password: e.target.value }))}
+                  required
+                  style={{ width: '100%', padding: '0.75rem' }}
+                />
+              </div>
+              {loginError && <div style={{ color: 'red', marginBottom: '1rem', padding: '0.5rem', backgroundColor: '#ffe6e6', border: '1px solid #ff0000', borderRadius: '4px', position: 'relative', zIndex: 1001 }}>{loginError}</div>}
+              
+              <div className="modal-footer">
+                <button type="submit" className="btn btn-primary" disabled={authLoading}>
+                  {authLoading ? 'Logging in...' : 'Login'}
+                </button>
+                <button type="button" className="btn btn-secondary" onClick={() => { setShowRegister(true); onClose() }}>
+                  Register
+                </button>
+                <button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const RegisterModal = ({ onClose }) => {
+    const [formData, setFormData] = useState({ username: '', email: '', password: '', confirmPassword: '' })
+    const [registerError, setRegisterError] = useState('')
+
+    const handleSubmit = async (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      setRegisterError('')
+      
+      // Frontend validation
+      if (!formData.username || !formData.email || !formData.password || !formData.confirmPassword) {
+        setRegisterError('Please fill in all fields')
+        return
+      }
+      
+      if (formData.username.length < 3 || formData.username.length > 50) {
+        setRegisterError('Username must be 3-50 characters')
+        return
+      }
+      
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(formData.email)) {
+        setRegisterError('Please enter a valid email address')
+        return
+      }
+      
+      if (formData.password.length < 6) {
+        setRegisterError('Password must be at least 6 characters')
+        return
+      }
+      
+      if (formData.password !== formData.confirmPassword) {
+        setRegisterError('Passwords do not match')
+        // Clear only passwords, keep username and email
+        setFormData(prev => ({ ...prev, password: '', confirmPassword: '' }))
+        return
+      }
+      
+      try {
+        const success = await register(formData.username, formData.email, formData.password)
+        if (success) {
+          onClose()
+        }
+      } catch (e) {
+        setRegisterError(e.message || 'Registration failed')
+        // Keep username and email, clear passwords
+        setFormData(prev => ({ ...prev, password: '', confirmPassword: '' }))
+      }
+    }
+
+    return (
+      <div className="modal-backdrop" onClick={(e) => { 
+        e.preventDefault()
+        e.stopPropagation()
+        if (e.target === e.currentTarget) onClose() 
+      }}>
+        <div className="modal" onClick={(e) => { e.stopPropagation() }}>
+          <div className="modal-header">
+            <h3>Register</h3>
+            <button aria-label="Close" className="delete-x" onClick={onClose}>×</button>
+          </div>
+          <div className="modal-body">
+            <form onSubmit={handleSubmit}>
+              <div style={{ marginBottom: '1rem' }}>
+                <input
+                  type="text"
+                  placeholder="Username"
+                  value={formData.username}
+                  onChange={e => setFormData(prev => ({ ...prev, username: e.target.value }))}
+                  required
+                  style={{ width: '100%', padding: '0.75rem', marginBottom: '0.5rem' }}
+                />
+                <input
+                  type="email"
+                  placeholder="Email"
+                  value={formData.email}
+                  onChange={e => setFormData(prev => ({ ...prev, email: e.target.value }))}
+                  required
+                  style={{ width: '100%', padding: '0.75rem', marginBottom: '0.5rem' }}
+                />
+                <input
+                  type="password"
+                  placeholder="Password"
+                  value={formData.password}
+                  onChange={e => setFormData(prev => ({ ...prev, password: e.target.value }))}
+                  required
+                  style={{ width: '100%', padding: '0.75rem', marginBottom: '0.5rem' }}
+                />
+                <input
+                  type="password"
+                  placeholder="Confirm Password"
+                  value={formData.confirmPassword}
+                  onChange={e => setFormData(prev => ({ ...prev, confirmPassword: e.target.value }))}
+                  required
+                  style={{ width: '100%', padding: '0.75rem' }}
+                />
+              </div>
+              {registerError && <div style={{ color: 'red', marginBottom: '1rem', padding: '0.5rem', backgroundColor: '#ffe6e6', border: '1px solid #ff0000', borderRadius: '4px', position: 'relative', zIndex: 1001 }}>{registerError}</div>}
+              
+              <div className="modal-footer">
+                <button type="submit" className="btn btn-primary" disabled={authLoading}>
+                  {authLoading ? 'Registering...' : 'Register'}
+                </button>
+                <button type="button" className="btn btn-secondary" onClick={() => { setShowLogin(true); onClose() }}>
+                  Login
+                </button>
+                <button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   const CreateModal = ({ onClose }) => {
     const [local, setLocal] = useState({ title: '', description: '', status: 'pending', dueDate: '' })
     const [files, setFiles] = useState([])
     const [fileInputKey, setFileInputKey] = useState(0)
+    const [createError, setCreateError] = useState('')
 
     const removeFile = (idx) => setFiles(prev => prev.filter((_, i) => i !== idx))
 
@@ -257,23 +590,33 @@ function App() {
           validateFiles(Array.from(newFiles));
           setFiles(prev => [...prev, ...Array.from(newFiles)])
           setFileInputKey(prev => prev + 1)
+          setCreateError('') // Clear any previous errors
         } catch (error) {
-          alert(error.message);
+          setCreateError(error.message);
         }
       }
     }
 
     const create = async () => {
+      setCreateError('')
+      
+      // Validation
+      if (!local.title.trim()) {
+        setCreateError('Title is required');
+        return;
+      }
+      
+      if (local.title.length > 255) {
+        setCreateError('Title must be 255 characters or less');
+        return;
+      }
+      
+      if (local.description.length > 10000) {
+        setCreateError('Description must be 10,000 characters or less');
+        return;
+      }
+      
       try {
-        if (local.title.length > 255) {
-          alert('Title must be 255 characters or less');
-          return;
-        }
-        if (local.description.length > 10000) {
-          alert('Description must be 10,000 characters or less');
-          return;
-        }
-        
         const created = await fetchJson(`${apiBase}/tasks`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -289,13 +632,19 @@ function App() {
           for (const file of files) {
             const fd = new FormData();
             fd.append('attachment', file)
-            await fetch(`${apiBase}/tasks/${created.id}/attachments`, { method: 'POST', body: fd })
+            await fetch(`${apiBase}/tasks/${created.id}/attachments`, { 
+              method: 'POST', 
+              body: fd,
+              credentials: 'include'
+            })
           }
         }
         
         onClose();
         load();
-      } catch (e) { alert(e.message) }
+      } catch (e) { 
+        setCreateError(e.message)
+      }
     }
 
     return (
@@ -306,6 +655,7 @@ function App() {
             <button aria-label="Close" className="delete-x" onClick={onClose}>×</button>
           </div>
           <div className="modal-body">
+            {createError && <div style={{ color: 'red', marginBottom: '1rem', padding: '0.5rem', backgroundColor: '#ffe6e6', border: '1px solid #ff0000', borderRadius: '4px' }}>{createError}</div>}
             <form className="inline" onSubmit={(e)=>{e.preventDefault(); create()}}>
               <input placeholder="Title" value={local.title} onChange={e=>setLocal(v=>({...v, title: e.target.value}))} />
               <input type="date" value={local.dueDate} onChange={e=>setLocal(v=>({...v, dueDate: e.target.value}))} />
@@ -353,14 +703,25 @@ function App() {
         <h1>📋 Task Manager</h1>
         <nav>
           <div className="header-toolbar">
-            <button className="btn btn-primary" onClick={()=>setShowCreate(true)}>Add</button>
-            <select className="header-filter" value={status} onChange={e=>setStatus(e.target.value)}>
-              <option value="all">All</option>
-              <option value="pending">Pending</option>
-              <option value="in-progress">In Progress</option>
-              <option value="completed">Completed</option>
-            </select>
-            <a href="#" onClick={(e)=>{e.preventDefault(); load()}}>Refresh</a>
+            {user ? (
+              <>
+                <span style={{ marginRight: '1rem' }}>Welcome, {user.username}!</span>
+                <button className="btn btn-primary" onClick={()=>setShowCreate(true)}>Add</button>
+                <select className="header-filter" value={status} onChange={e=>setStatus(e.target.value)}>
+                  <option value="all">All</option>
+                  <option value="pending">Pending</option>
+                  <option value="in-progress">In Progress</option>
+                  <option value="completed">Completed</option>
+                </select>
+                <a href="#" onClick={(e)=>{e.preventDefault(); load()}}>Refresh</a>
+                <button className="btn btn-secondary" onClick={logout}>Logout</button>
+              </>
+            ) : (
+              <>
+                <button className="btn btn-primary" onClick={() => setShowLogin(true)}>Login</button>
+                <button className="btn btn-secondary" onClick={() => setShowRegister(true)}>Register</button>
+              </>
+            )}
           </div>
         </nav>
       </header>
@@ -368,18 +729,25 @@ function App() {
       <main>
         <div className="container">
           <section style={{flex:'1 1 auto'}}>
-            <div className="tasks">
-              <h2>Tasks ({tasks.length})</h2>
-              {loading ? <div className="no-tasks"><p>Loading...</p></div> : (
-                tasks.length === 0 ? (
-                  <div className="no-tasks"><p>No tasks found.</p></div>
-                ) : (
-                  <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(300px, 1fr))', gap:'1rem'}}>
-                    {tasks.map(t => <TaskCard key={t.id} t={t} />)}
-                  </div>
-                )
-              )}
-            </div>
+            {user ? (
+              <div className="tasks">
+                <h2>Tasks ({tasks.length})</h2>
+                {loading ? <div className="no-tasks"><p>Loading...</p></div> : (
+                  tasks.length === 0 ? (
+                    <div className="no-tasks"><p>No tasks found.</p></div>
+                  ) : (
+                    <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(300px, 1fr))', gap:'1rem'}}>
+                      {tasks.map(t => <TaskCard key={t.id} t={t} />)}
+                    </div>
+                  )
+                )}
+              </div>
+            ) : (
+              <div className="welcome-message" style={{textAlign: 'center', padding: '2rem'}}>
+                <h2>Welcome to Task Manager</h2>
+                <p>Please login or register to manage your tasks.</p>
+              </div>
+            )}
           </section>
         </div>
       </main>
@@ -390,6 +758,8 @@ function App() {
 
       {editingTask && <EditModal task={editingTask} onClose={()=>setEditingTask(null)} />}
       {showCreate && <CreateModal onClose={()=>setShowCreate(false)} />}
+      {showLogin && <LoginModal onClose={() => setShowLogin(false)} />}
+      {showRegister && <RegisterModal onClose={() => setShowRegister(false)} />}
     </>
   )
 }

@@ -3,7 +3,9 @@ const path = require('path');
 const multer = require('multer');
 const bodyParser = require('body-parser');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 const { db, initializeDatabase } = require('./database');
+const { initializeUsersTable, userDb, tokenUtils, authMiddleware } = require('./auth');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -11,9 +13,11 @@ const PORT = process.env.PORT || 3001;
 app.use(cors({
   origin: [/^http:\/\/localhost:\d+$/],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type']
+  allowedHeaders: ['Content-Type'],
+  credentials: true // Allow cookies to be sent
 }));
 
+app.use(cookieParser());
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 
@@ -77,9 +81,117 @@ function normalizeTask(task) {
   };
 }
 
+// Authentication routes
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { username, email, password } = req.body;
+    
+    // Validation
+    if (!username || !email || !password) {
+      return res.status(400).json({ error: 'Username, email, and password are required' });
+    }
+    if (username.length < 3 || username.length > 50) {
+      return res.status(400).json({ error: 'Username must be 3-50 characters' });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+    
+    // Email validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: 'Please enter a valid email address' });
+    }
+    
+    // Check if user already exists
+    const existingUser = await userDb.getUserByUsername(username);
+    if (existingUser) {
+      return res.status(400).json({ error: 'Username already exists' });
+    }
+    
+    // Check if email already exists
+    const existingEmail = await userDb.getUserByEmail(email);
+    if (existingEmail) {
+      return res.status(400).json({ error: 'Email already exists' });
+    }
+    
+    // Create user
+    const user = await userDb.createUser({ username, email, password });
+    
+    // Generate token
+    const token = tokenUtils.generateToken(user);
+    
+    // Set httpOnly cookie
+    res.cookie('authToken', token, {
+      httpOnly: true,
+      secure: false, // Set to true in production with HTTPS
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      sameSite: 'lax'
+    });
+    
+    res.status(201).json({ 
+      message: 'User created successfully',
+      user: { id: user.id, username: user.username, email: user.email }
+    });
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required' });
+    }
+    
+    // Verify credentials
+    const user = await userDb.verifyPassword(username, password);
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid username or password' });
+    }
+    
+    // Generate token
+    const token = tokenUtils.generateToken(user);
+    
+    // Set httpOnly cookie
+    res.cookie('authToken', token, {
+      httpOnly: true,
+      secure: false, 
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      sameSite: 'lax'
+    });
+    
+    res.status(200).json({ 
+      message: 'Login successful',
+      user: { id: user.id, username: user.username, email: user.email }
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('authToken');
+  res.status(200).json({ message: 'Logout successful' });
+});
+
+app.get('/api/auth/me', authMiddleware, (req, res) => {
+  res.status(200).json({ 
+    user: { 
+      id: req.user.id, 
+      username: req.user.username, 
+      email: req.user.email 
+    } 
+  });
+});
+
 const api = express.Router();
 
-api.get('/tasks', async (req, res) => {
+api.get('/tasks', authMiddleware, async (req, res) => {
   try {
     const statusFilter = req.query.status || 'all';
     const tasks = await db.getAllTasks(statusFilter);
@@ -90,7 +202,7 @@ api.get('/tasks', async (req, res) => {
   }
 });
 
-api.get('/tasks/:id', async (req, res) => {
+api.get('/tasks/:id', authMiddleware, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const task = await db.getTaskById(id);
@@ -102,7 +214,7 @@ api.get('/tasks/:id', async (req, res) => {
   }
 });
 
-api.post('/tasks', async (req, res) => {
+api.post('/tasks', authMiddleware, async (req, res) => {
   try {
     const { title, description, status, dueDate } = req.body;
     
@@ -126,7 +238,7 @@ api.post('/tasks', async (req, res) => {
   }
 });
 
-api.put('/tasks/:id', async (req, res) => {
+api.put('/tasks/:id', authMiddleware, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const existing = await db.getTaskById(id);
@@ -158,7 +270,7 @@ api.put('/tasks/:id', async (req, res) => {
   }
 });
 
-api.delete('/tasks/:id', async (req, res) => {
+api.delete('/tasks/:id', authMiddleware, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const existing = await db.getTaskById(id);
@@ -171,7 +283,7 @@ api.delete('/tasks/:id', async (req, res) => {
   }
 });
 
-api.post('/tasks/:id/attachments', upload.array('attachment', 10), async (req, res) => {
+api.post('/tasks/:id/attachments', authMiddleware, upload.array('attachment', 10), async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const existing = await db.getTaskById(id);
@@ -217,7 +329,7 @@ api.post('/tasks/:id/attachments', upload.array('attachment', 10), async (req, r
   }
 });
 
-api.delete('/attachments/:id', async (req, res) => {
+api.delete('/attachments/:id', authMiddleware, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     await db.deleteAttachment(id);
@@ -233,6 +345,7 @@ app.use('/api', api);
 async function start() {
   try {
     await initializeDatabase();
+    await initializeUsersTable();
     app.listen(PORT, () => console.log(`Server listening on http://localhost:${PORT}`));
   } catch (e) {
     console.error('Failed to start server:', e);
