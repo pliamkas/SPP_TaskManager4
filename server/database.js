@@ -42,6 +42,21 @@ async function initializeDatabase() {
       )
     `);
 
+    // Add user_id column and FK to users if not exists
+    await pool.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS user_id INTEGER`);
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.table_constraints 
+          WHERE constraint_name = 'fk_tasks_user' AND table_name = 'tasks'
+        ) THEN
+          ALTER TABLE tasks ADD CONSTRAINT fk_tasks_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+        END IF;
+      END$$;
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)`);
+
     // Create attachments table with UTF-8 support
     await pool.query(`
       CREATE TABLE IF NOT EXISTS attachments (
@@ -64,13 +79,13 @@ async function initializeDatabase() {
 // Database operations
 const db = {
   // Task operations
-  async getAllTasks(statusFilter = 'all') {
-    let query = 'SELECT * FROM tasks ORDER BY created_at DESC';
-    let params = [];
+  async getAllTasks(statusFilter = 'all', userId) {
+    let query = 'SELECT * FROM tasks WHERE user_id = $1 ORDER BY created_at DESC';
+    let params = [userId];
 
     if (statusFilter !== 'all') {
-      query = 'SELECT * FROM tasks WHERE status = $1 ORDER BY created_at DESC';
-      params = [statusFilter];
+      query = 'SELECT * FROM tasks WHERE user_id = $1 AND status = $2 ORDER BY created_at DESC';
+      params = [userId, statusFilter];
     }
 
     const result = await pool.query(query, params);
@@ -88,8 +103,8 @@ const db = {
     return tasks;
   },
 
-  async getTaskById(id) {
-    const result = await pool.query('SELECT * FROM tasks WHERE id = $1', [id]);
+  async getTaskById(id, userId) {
+    const result = await pool.query('SELECT * FROM tasks WHERE id = $1 AND user_id = $2', [id, userId]);
     if (result.rows.length === 0) {
       return null;
     }
@@ -106,28 +121,37 @@ const db = {
     return task;
   },
 
+  // Claim orphan task (no owner) to a user, return task or null
+  async claimTaskOwner(id, userId) {
+    const result = await pool.query(
+      'UPDATE tasks SET user_id = $2 WHERE id = $1 AND user_id IS NULL RETURNING *',
+      [id, userId]
+    );
+    return result.rows[0] || null;
+  },
+
   async createTask(taskData) {
-    const { title, description, status, dueDate } = taskData;
+    const { title, description, status, dueDate, userId } = taskData;
     const dueDateValue = dueDate && String(dueDate).trim() !== '' ? dueDate : null;
     const result = await pool.query(
-      'INSERT INTO tasks (title, description, status, due_date) VALUES ($1, $2, $3, $4) RETURNING *',
-      [title, description, status, dueDateValue]
+      'INSERT INTO tasks (title, description, status, due_date, user_id) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [title, description, status, dueDateValue, userId]
     );
     return result.rows[0];
   },
 
   async updateTask(id, taskData) {
-    const { title, description, status, dueDate } = taskData;
+    const { title, description, status, dueDate, userId } = taskData;
     const dueDateValue = dueDate && String(dueDate).trim() !== '' ? dueDate : null;
     const result = await pool.query(
-      'UPDATE tasks SET title = $1, description = $2, status = $3, due_date = $4, updated_at = CURRENT_TIMESTAMP WHERE id = $5 RETURNING *',
-      [title, description, status, dueDateValue, id]
+      'UPDATE tasks SET title = $1, description = $2, status = $3, due_date = $4, updated_at = CURRENT_TIMESTAMP WHERE id = $5 AND user_id = $6 RETURNING *',
+      [title, description, status, dueDateValue, id, userId]
     );
     return result.rows[0];
   },
 
-  async deleteTask(id) {
-    await pool.query('DELETE FROM tasks WHERE id = $1', [id]);
+  async deleteTask(id, userId) {
+    await pool.query('DELETE FROM tasks WHERE id = $1 AND user_id = $2', [id, userId]);
   },
 
   async toggleTaskStatus(id) {

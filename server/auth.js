@@ -115,8 +115,14 @@ const tokenUtils = {
 // Authentication middleware
 const authMiddleware = async (req, res, next) => {
   try {
-    // Get token from httpOnly cookie
-    const token = req.cookies.authToken;
+    // Get token from httpOnly cookie OR Authorization header (Bearer <token>)
+    let token = req.cookies.authToken;
+    if (!token && req.headers && req.headers.authorization) {
+      const authHeader = req.headers.authorization;
+      if (authHeader.toLowerCase().startsWith('bearer ')) {
+        token = authHeader.slice(7).trim();
+      }
+    }
     
     if (!token) {
       return res.status(401).json({ error: 'Authentication required' });

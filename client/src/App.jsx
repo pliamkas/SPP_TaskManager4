@@ -1,27 +1,127 @@
 import React, { useEffect, useState } from 'react'
+import { io } from 'socket.io-client'
 
 const apiBase = '/api'
 
+// Socket.IO connection management (no GUI changes)
+let socket = null
+let socketReady = null
+
+function disconnectSocket() {
+  try {
+    if (socket) {
+      socket.removeAllListeners && socket.removeAllListeners()
+      socket.disconnect && socket.disconnect()
+    }
+  } catch (_) {}
+  socket = null
+  socketReady = null
+}
+
+function getSocket() {
+  if (!socketReady) {
+    socketReady = new Promise((resolve, reject) => {
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('authToken') : null
+      socket = io('http://localhost:3001', {
+        withCredentials: true,
+        transports: ['polling', 'websocket'],
+        timeout: 20000,
+        autoConnect: false,
+        reconnection: true,
+        auth: token ? { token } : undefined
+      })
+      socket.on('connect', () => resolve(socket))
+      socket.on('connect_error', (e) => reject(e))
+      try { socket.connect() } catch (_) {}
+      if (typeof window !== 'undefined' && !window.__socketUnloadBound) {
+        window.addEventListener('beforeunload', () => {
+          try { socket && socket.close && socket.close() } catch (_) {}
+        })
+        window.__socketUnloadBound = true
+      }
+    })
+  }
+  return socketReady
+}
+
+function socketEmit(event, payload) {
+  return getSocket().then((s) => new Promise((resolve, reject) => {
+    // pass token via auth and cookies
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('authToken') : null
+    if (token) s.auth = { token }
+    const finalPayload = (payload && typeof payload === 'object')
+      ? (token ? { ...payload, token } : payload)
+      : (token ? { token } : payload)
+    s.emit(event, finalPayload, (res) => {
+      if (!res) return reject(new Error('No response'))
+      if (res.error) return reject(new Error(res.error))
+      resolve(res)
+    })
+  }))
+}
+
+// Drop-in replacement to preserve GUI and call sites
 function fetchJson(url, options = {}) {
+  // Auth endpoints
+  if (url.endsWith('/auth/login')) {
+    const body = options.body ? JSON.parse(options.body) : {}
+    return socketEmit('auth:login', body).then((res) => {
+      if (res.token) localStorage.setItem('authToken', res.token)
+      return { user: res.user }
+    })
+  }
+  if (url.endsWith('/auth/register')) {
+    const body = options.body ? JSON.parse(options.body) : {}
+    return socketEmit('auth:register', body).then((res) => {
+      if (res.token) localStorage.setItem('authToken', res.token)
+      return { user: res.user }
+    })
+  }
+  if (url.endsWith('/auth/logout')) {
+    return socketEmit('auth:logout', {}).then(() => {
+      localStorage.removeItem('authToken')
+      disconnectSocket()
+      return { message: 'Logout successful' }
+    })
+  }
+  if (url.endsWith('/auth/me')) {
+    return socketEmit('auth:me', {}).then((res) => ({ user: res.user }))
+  }
+
+  // Tasks endpoints
+  if (url.includes('/tasks?')) {
+    const status = new URLSearchParams(url.split('?')[1]).get('status') || 'all'
+    return socketEmit('tasks:get', { status })
+  }
+  if (/\/tasks\/$/.test(url) || url.endsWith('/tasks')) {
+    const body = options.body ? JSON.parse(options.body) : {}
+    return socketEmit('tasks:create', body)
+  }
+  if (/\/tasks\/(\d+)$/.test(url) && options.method === 'PUT') {
+    const id = parseInt(url.match(/\/(\d+)$/)[1])
+    const body = options.body ? JSON.parse(options.body) : {}
+    return socketEmit('tasks:update', { id, ...body })
+  }
+  if (/\/tasks\/(\d+)$/.test(url) && options.method === 'DELETE') {
+    const id = parseInt(url.match(/\/(\d+)$/)[1])
+    return socketEmit('tasks:delete', { id }).then(() => ({ success: true }))
+  }
+  if (/\/attachments\/(\d+)$/.test(url) && options.method === 'DELETE') {
+    const id = parseInt(url.match(/\/(\d+)$/)[1])
+    return socketEmit('attachments:delete', { id }).then(() => ({ success: true }))
+  }
+
+  // Fallback to HTTP for file uploads
   return fetch(url, {
     ...options,
-    credentials: 'include' 
+    credentials: 'include'
   }).then(async r => {
     if (!r.ok) {
       const errorData = await r.json().catch(() => ({}));
       const errorMessage = errorData.error || 'Request failed';
-      
-      // For auth endpoints, treat 401 as normal error
-      if (url.includes('/auth/') && r.status === 401) {
-        throw new Error(errorMessage);
-      }
-      
-      // For other endpoints, treat 401 as auth required
-      if (r.status === 401) {
-        throw new Error('AUTH_REQUIRED');
-      }
-      
-      throw new Error(errorMessage);
+      if (url.includes('/auth/') && r.status === 401) throw new Error(errorMessage)
+      if (r.status === 401) throw new Error('AUTH_REQUIRED')
+      throw new Error(errorMessage)
     }
     return r.json();
   })
@@ -294,14 +394,18 @@ function App() {
         const fd = new FormData();
         fd.append('attachment', file)
         try {
+          const token = typeof localStorage !== 'undefined' ? localStorage.getItem('authToken') : null
           const res = await fetch(`${apiBase}/tasks/${task.id}/attachments`, { 
             method: 'POST', 
             body: fd,
-            credentials: 'include'
+            credentials: 'include',
+            headers: token ? { 'Authorization': `Bearer ${token}` } : undefined
           })
           if (res.ok) {
-            const created = await res.json().catch(()=>null)
-            if (created) {
+            const payload = await res.json().catch(()=>null)
+            const items = Array.isArray(payload) ? payload : (payload ? [payload] : [])
+            if (items.length) {
+              const created = items[0]
               setAttachments(prev => prev.map(a => a.id === tempId ? {
                 id: created.id,
                 filename: created.filename,
@@ -635,7 +739,8 @@ function App() {
             await fetch(`${apiBase}/tasks/${created.id}/attachments`, { 
               method: 'POST', 
               body: fd,
-              credentials: 'include'
+              credentials: 'include',
+              headers: (()=>{ const t = localStorage.getItem('authToken'); return t ? { 'Authorization': `Bearer ${t}` } : {} })()
             })
           }
         }

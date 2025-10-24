@@ -1,4 +1,7 @@
 const express = require('express');
+const { createServer } = require('http');
+const { Server } = require('socket.io');
+const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
 const bodyParser = require('body-parser');
@@ -8,12 +11,20 @@ const { db, initializeDatabase } = require('./database');
 const { initializeUsersTable, userDb, tokenUtils, authMiddleware } = require('./auth');
 
 const app = express();
+const server = createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: [/^http:\/\/localhost:\d+$/],
+    methods: ['GET', 'POST'],
+    credentials: true
+  }
+});
 const PORT = process.env.PORT || 3001;
 
 app.use(cors({
   origin: [/^http:\/\/localhost:\d+$/],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true // Allow cookies to be sent
 }));
 
@@ -21,13 +32,21 @@ app.use(cookieParser());
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 
-// Serve uploads for client access
-app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+// Ensure uploads directory exists and serve it
+const uploadsDir = path.join(__dirname, '..', 'uploads');
+try { if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true }); } catch (e) { console.error('Failed to ensure uploads dir:', e); }
+app.use('/uploads', express.static(uploadsDir));
 
 // Multer storage for attachments
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    cb(null, path.join(__dirname, '..', 'uploads'));
+    const dir = path.join(__dirname, '..', 'uploads');
+    try {
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    } catch (e) {
+      return cb(e);
+    }
+    cb(null, dir);
   },
   filename: function (req, file, cb) {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
@@ -194,7 +213,7 @@ const api = express.Router();
 api.get('/tasks', authMiddleware, async (req, res) => {
   try {
     const statusFilter = req.query.status || 'all';
-    const tasks = await db.getAllTasks(statusFilter);
+    const tasks = await db.getAllTasks(statusFilter, req.user.id);
     res.status(200).json(tasks.map(normalizeTask));
   } catch (e) {
     console.error('GET /api/tasks error:', e);
@@ -205,7 +224,7 @@ api.get('/tasks', authMiddleware, async (req, res) => {
 api.get('/tasks/:id', authMiddleware, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
-    const task = await db.getTaskById(id);
+    const task = await db.getTaskById(id, req.user.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
     res.status(200).json(normalizeTask(task));
   } catch (e) {
@@ -229,8 +248,8 @@ api.post('/tasks', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Description must be 10,000 characters or less' });
     }
     
-    const created = await db.createTask({ title, description: description || '', status: status || 'pending', dueDate: dueDate || null });
-    const full = await db.getTaskById(created.id);
+    const created = await db.createTask({ title, description: description || '', status: status || 'pending', dueDate: dueDate || null, userId: req.user.id });
+    const full = await db.getTaskById(created.id, req.user.id);
     res.status(201).json(normalizeTask(full));
   } catch (e) {
     console.error('POST /api/tasks error:', e);
@@ -241,8 +260,15 @@ api.post('/tasks', authMiddleware, async (req, res) => {
 api.put('/tasks/:id', authMiddleware, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
-    const existing = await db.getTaskById(id);
-    if (!existing) return res.status(404).json({ error: 'Task not found' });
+    let existing = await db.getTaskById(id, req.user.id);
+    if (!existing) {
+      const claimed = await db.claimTaskOwner(id, req.user.id);
+      if (claimed) {
+        existing = claimed;
+      } else {
+        return res.status(404).json({ error: 'Task not found' });
+      }
+    }
     const { title, description, status, dueDate } = req.body;
     
     // Validation
@@ -260,9 +286,10 @@ api.put('/tasks/:id', authMiddleware, async (req, res) => {
       title: newTitle,
       description: newDescription,
       status: status ?? existing.status,
-      dueDate: dueDate ?? (existing.due_date ? new Date(existing.due_date).toISOString().slice(0, 10) : null)
+      dueDate: dueDate ?? (existing.due_date ? new Date(existing.due_date).toISOString().slice(0, 10) : null),
+      userId: req.user.id
     });
-    const full = await db.getTaskById(updated.id);
+    const full = await db.getTaskById(updated.id, req.user.id);
     res.status(200).json(normalizeTask(full));
   } catch (e) {
     console.error('PUT /api/tasks/:id error:', e);
@@ -273,9 +300,16 @@ api.put('/tasks/:id', authMiddleware, async (req, res) => {
 api.delete('/tasks/:id', authMiddleware, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
-    const existing = await db.getTaskById(id);
-    if (!existing) return res.status(404).json({ error: 'Task not found' });
-    await db.deleteTask(id);
+    let existing = await db.getTaskById(id, req.user.id);
+    if (!existing) {
+      const claimed = await db.claimTaskOwner(id, req.user.id);
+      if (claimed) {
+        existing = claimed;
+      } else {
+        return res.status(404).json({ error: 'Task not found' });
+      }
+    }
+    await db.deleteTask(id, req.user.id);
     res.status(204).end();
   } catch (e) {
     console.error('DELETE /api/tasks/:id error:', e);
@@ -286,8 +320,16 @@ api.delete('/tasks/:id', authMiddleware, async (req, res) => {
 api.post('/tasks/:id/attachments', authMiddleware, upload.array('attachment', 10), async (req, res) => {
   try {
     const id = parseInt(req.params.id);
-    const existing = await db.getTaskById(id);
-    if (!existing) return res.status(404).json({ error: 'Task not found' });
+    let existing = await db.getTaskById(id, req.user.id);
+    if (!existing) {
+      // Backward-compat: claim orphan tasks created before user_id migration
+      const claimed = await db.claimTaskOwner(id, req.user.id);
+      if (claimed) {
+        existing = claimed;
+      } else {
+        return res.status(404).json({ error: 'Task not found' });
+      }
+    }
     if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
 
     const uploadedFiles = [];
@@ -342,11 +384,196 @@ api.delete('/attachments/:id', authMiddleware, async (req, res) => {
 
 app.use('/api', api);
 
+// Socket.IO event handlers mirroring REST API
+io.on('connection', (socket) => {
+  // AUTH
+  socket.on('auth:register', async (data, callback) => {
+    try {
+      const { username, email, password } = data || {};
+      if (!username || !email || !password) {
+        return callback({ error: 'Username, email, and password are required' });
+      }
+      if (username.length < 3 || username.length > 50) {
+        return callback({ error: 'Username must be 3-50 characters' });
+      }
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        return callback({ error: 'Please enter a valid email address' });
+      }
+      if (password.length < 6) {
+        return callback({ error: 'Password must be at least 6 characters' });
+      }
+
+      const existingUser = await userDb.getUserByUsername(username);
+      if (existingUser) return callback({ error: 'Username already exists' });
+      const existingEmail = await userDb.getUserByEmail(email);
+      if (existingEmail) return callback({ error: 'Email already exists' });
+
+      const user = await userDb.createUser({ username, email, password });
+      const token = tokenUtils.generateToken(user);
+      callback({ user: { id: user.id, username: user.username, email: user.email }, token });
+    } catch (error) {
+      console.error('Socket register error:', error);
+      callback({ error: 'Registration failed' });
+    }
+  });
+
+  socket.on('auth:login', async (data, callback) => {
+    try {
+      const { username, password } = data || {};
+      if (!username || !password) {
+        return callback({ error: 'Username and password are required' });
+      }
+      const user = await userDb.verifyPassword(username, password);
+      if (!user) return callback({ error: 'Invalid username or password' });
+      const token = tokenUtils.generateToken(user);
+      callback({ user: { id: user.id, username: user.username, email: user.email }, token });
+    } catch (error) {
+      console.error('Socket login error:', error);
+      callback({ error: 'Login failed' });
+    }
+  });
+
+  socket.on('auth:logout', (data, callback) => {
+    if (typeof callback === 'function') {
+      callback({ message: 'Logout successful' });
+    }
+  });
+
+  socket.on('auth:me', async (data, callback) => {
+    try {
+      const user = await requireAuth(data);
+      if (!user) return callback({ error: 'Authentication required' });
+      callback({ user: { id: user.id, username: user.username, email: user.email } });
+    } catch (error) {
+      console.error('Socket me error:', error);
+      callback({ error: 'Authentication failed' });
+    }
+  });
+
+  // Helper to require auth per-event
+  const requireAuth = async (data) => {
+    const token = (socket.handshake.auth && socket.handshake.auth.token) ||
+      ((socket.handshake.headers && socket.handshake.headers.cookie || '').match(/(?:^|; )authToken=([^;]+)/)?.[1] && decodeURIComponent((socket.handshake.headers.cookie.match(/(?:^|; )authToken=([^;]+)/) || [])[1])) ||
+      (data && data.token) || null;
+    if (!token) return null;
+    const decoded = tokenUtils.verifyToken(token);
+    if (!decoded) return null;
+    const user = await userDb.getUserById(decoded.userId);
+    return user || null;
+  };
+
+  // TASKS
+  socket.on('tasks:get', async (data, callback) => {
+    try {
+      const user = await requireAuth(data);
+      if (!user) return callback({ error: 'AUTH_REQUIRED' });
+      const statusFilter = (data && data.status) || 'all';
+      const tasks = await db.getAllTasks(statusFilter, user.id);
+      callback(tasks.map(normalizeTask));
+    } catch (e) {
+      console.error('Socket tasks:get error:', e);
+      callback({ error: 'Failed to fetch tasks' });
+    }
+  });
+
+  socket.on('tasks:getById', async (data, callback) => {
+    try {
+      const user = await requireAuth(data);
+      if (!user) return callback({ error: 'AUTH_REQUIRED' });
+      const id = parseInt(data && data.id);
+      const task = await db.getTaskById(id, user.id);
+      if (!task) return callback({ error: 'Task not found' });
+      callback(normalizeTask(task));
+    } catch (e) {
+      console.error('Socket tasks:getById error:', e);
+      callback({ error: 'Failed to fetch task' });
+    }
+  });
+
+  socket.on('tasks:create', async (data, callback) => {
+    try {
+      const user = await requireAuth(data);
+      if (!user) return callback({ error: 'AUTH_REQUIRED' });
+      const { title, description, status, dueDate } = data || {};
+      if (!title || typeof title !== 'string') return callback({ error: 'Title is required' });
+      if (title.length > 255) return callback({ error: 'Title must be 255 characters or less' });
+      if (description && description.length > 10000) return callback({ error: 'Description must be 10,000 characters or less' });
+      const created = await db.createTask({ title, description: description || '', status: status || 'pending', dueDate: dueDate || null, userId: user.id });
+      const full = await db.getTaskById(created.id, user.id);
+      const normalized = normalizeTask(full);
+      callback(normalized);
+      io.emit('tasks:created', normalized);
+    } catch (e) {
+      console.error('Socket tasks:create error:', e);
+      callback({ error: 'Failed to create task' });
+    }
+  });
+
+  socket.on('tasks:update', async (data, callback) => {
+    try {
+      const user = await requireAuth(data);
+      if (!user) return callback({ error: 'AUTH_REQUIRED' });
+      const { id, title, description, status, dueDate } = data || {};
+      const existing = await db.getTaskById(parseInt(id), user.id);
+      if (!existing) return callback({ error: 'Task not found' });
+      const newTitle = title ?? existing.title;
+      const newDescription = description ?? existing.description;
+      if (newTitle && newTitle.length > 255) return callback({ error: 'Title must be 255 characters or less' });
+      if (newDescription && newDescription.length > 10000) return callback({ error: 'Description must be 10,000 characters or less' });
+      const updated = await db.updateTask(parseInt(id), {
+        title: newTitle,
+        description: newDescription,
+        status: status ?? existing.status,
+        dueDate: dueDate ?? (existing.due_date ? new Date(existing.due_date).toISOString().slice(0, 10) : null),
+        userId: user.id
+      });
+      const full = await db.getTaskById(updated.id, user.id);
+      const normalized = normalizeTask(full);
+      callback(normalized);
+      io.emit('tasks:updated', normalized);
+    } catch (e) {
+      console.error('Socket tasks:update error:', e);
+      callback({ error: 'Failed to update task' });
+    }
+  });
+
+  socket.on('tasks:delete', async (data, callback) => {
+    try {
+      const user = await requireAuth(data);
+      if (!user) return callback({ error: 'AUTH_REQUIRED' });
+      const id = parseInt(data && data.id);
+      const existing = await db.getTaskById(id, user.id);
+      if (!existing) return callback({ error: 'Task not found' });
+      await db.deleteTask(id, user.id);
+      callback({ success: true });
+      io.emit('tasks:deleted', { id });
+    } catch (e) {
+      console.error('Socket tasks:delete error:', e);
+      callback({ error: 'Failed to delete task' });
+    }
+  });
+
+  socket.on('attachments:delete', async (data, callback) => {
+    try {
+      const user = await requireAuth(data);
+      if (!user) return callback({ error: 'AUTH_REQUIRED' });
+      const id = parseInt(data && data.id);
+      await db.deleteAttachment(id);
+      callback({ success: true });
+      io.emit('attachments:deleted', { id });
+    } catch (e) {
+      console.error('Socket attachments:delete error:', e);
+      callback({ error: 'Failed to delete attachment' });
+    }
+  });
+});
+
 async function start() {
   try {
     await initializeDatabase();
     await initializeUsersTable();
-    app.listen(PORT, () => console.log(`Server listening on http://localhost:${PORT}`));
+    server.listen(PORT, () => console.log(`Server listening on http://localhost:${PORT}`));
   } catch (e) {
     console.error('Failed to start server:', e);
     process.exit(1);
